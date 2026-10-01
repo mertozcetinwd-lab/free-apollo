@@ -1,0 +1,21 @@
+{
+  "name": "free-apollo",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Standalone prospecting workspace with public discovery, sourced records, draft sequences and a pipeline.",
+  "scripts": {
+    "setup": "node dev/setup.mjs",
+    "test": "node --test test/*.test.mjs",
+    "mutate": "node dev/mutate.mjs",
+    "db:local": "wrangler d1 execute free-apollo --local --file schema.sql",
+    "migrate:local": "node dev/migrate.mjs",
+    "db:remote": "wrangler d1 execute free-apollo --remote --file schema.sql",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^4.125.0"
+  },
+  "license": "MIT"
+}

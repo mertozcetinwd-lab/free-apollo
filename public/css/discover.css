@@ -1,0 +1,12 @@
+.discovery-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.discovery-grid .prospect-transfer { min-width: 0; }
+.discovery-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: 20px 0; }
+.discovery-form > label { display: grid; gap: 6px; font-size: 13px; }
+.discovery-form .discovery-check { grid-column: 1 / -1; display: flex; align-items: flex-start; gap: 8px; line-height: 1.4; }
+.discovery-form > button { justify-self: start; align-self: end; }
+.discovery-results { overflow-x: auto; }
+.discovery-results .prospect-table { min-width: 580px; }
+.discovery-results a { color: var(--accent); }
+.discovery-recent { gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+@media (max-width: 960px) { .discovery-grid { grid-template-columns: 1fr; } }
+@media (max-width: 620px) { .discovery-form { grid-template-columns: 1fr; } }
