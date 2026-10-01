@@ -1,11 +1,11 @@
 import { h } from '../dom.js';
 import { api } from '../api.js';
-import { state } from '../store.js';
+import { state, reload } from '../store.js';
 import { nav } from '../nav.js';
 import { toast } from '../ui/overlay.js';
 import { LOCAL_CATEGORIES, checkArea, runOverpass } from '../overpass.js';
 
-const last = { company: null, local: null, people: null, busy: false, status: '', recent: null };
+const last = { company: null, local: null, people: null, site: null, siteInput: {}, busy: false, status: '', recent: null };
 const redraw = () => { if (nav.current().page === 'prospect') nav.go(location.pathname); };
 const button = (label, onClick, className = 'btn') => h('button', { class: className, type: 'button', onClick }, label);
 const field = (name, placeholder = '', value = '') => h('input', { class: 'input', name, placeholder, value, 'aria-label': name.replaceAll('_', ' ') });
@@ -54,6 +54,20 @@ async function runPeople(form) {
   last.busy = false; redraw();
 }
 
+async function runSite(form) {
+  if (last.busy) return;
+  const input = Object.fromEntries(new FormData(form));
+  last.siteInput = input;
+  last.busy = true; last.status = 'Reading the chosen company page…'; redraw();
+  try {
+    last.site = await api.post('/prospect/search/company-site', { company_id: Number(input.company_id),
+      url: input.url, name: input.name, title: input.title });
+    last.status = `${last.site.results.length} owner or founder candidates found on the chosen page. Review the page before saving. No email was verified.`;
+    loadRecent();
+  } catch (e) { last.status = `Company page search stopped: ${e.message}`; }
+  last.busy = false; redraw();
+}
+
 async function saveSelected(search, table) {
   const selected = [...table.querySelectorAll('input[type="checkbox"]:checked')].map((el) => Number(el.value));
   if (!selected.length) return toast('Select at least one result.');
@@ -64,6 +78,7 @@ async function saveSelected(search, table) {
       const result = await api.post('/prospect/search/save', { search_id: search.id, indices: selected.slice(i, i + batch) });
       total.added += result.added; total.existing += result.existing;
     }
+    await reload(search.kind);
     last.status = `${total.added} saved, ${total.existing} already saved. Source evidence is attached to each record.`;
     toast(last.status); redraw();
   } catch (e) { last.status = `Save stopped: ${e.message}. Already saved rows remain in your records.`; redraw(); }
@@ -111,7 +126,8 @@ async function loadRecent() {
 async function openRecent(item) {
   try {
     const search = await api.get(`/prospect/search/${item.id}`);
-    if (search.kind === 'people') last.people = search;
+    if (search.source === 'company_site') last.site = search;
+    else if (search.kind === 'people') last.people = search;
     else if (search.source === 'osm_local') last.local = search;
     else last.company = search;
     last.status = `Opened ${search.results.length} saved ${search.kind} results. No new provider charge.`;
@@ -122,6 +138,7 @@ async function openRecent(item) {
 export function discover() {
   if (last.recent === null) queueMicrotask(loadRecent);
   const people = state.rows.people || [];
+  const companies = state.rows.companies || [];
   const companyForm = h('form', { class: 'discovery-form', onSubmit: (e) => { e.preventDefault(); runCompany(e.currentTarget); } },
     h('label', null, 'Industry', field('industry', 'Example: software')),
     h('label', null, 'US state, optional', field('state', 'FL')),
@@ -140,6 +157,13 @@ export function discover() {
     h('label', { class: 'discovery-check' }, h('input', { type: 'checkbox', name: 'approved' }),
       'I approve a provider search with a maximum charge of $0.100. The actual charge is logged.'),
     button('Find people', () => runPeople(peopleForm), 'btn primary'));
+  const siteForm = h('form', { class: 'discovery-form', onSubmit: (e) => { e.preventDefault(); runSite(e.currentTarget); } },
+    h('label', null, 'Saved company', h('select', { class: 'input', name: 'company_id' },
+      companies.map((c) => h('option', { value: c.id, selected: String(c.id) === last.siteInput.company_id }, c.name)))),
+    h('label', null, 'Official team or about page', field('url', 'https://example.com/about/', last.siteInput.url || '')),
+    h('label', null, 'Name seen on page, optional', field('name', 'Full name', last.siteInput.name || '')),
+    h('label', null, 'Role seen near name, optional', field('title', 'Owner', last.siteInput.title || '')),
+    button('Find named leaders', () => runSite(siteForm), 'btn primary'));
   const action = h('select', { class: 'input', name: 'action', 'aria-label': 'Enrichment action' },
     h('option', { value: 'email_find' }, 'Find work email, up to $0.020'),
     h('option', { value: 'email_verify' }, 'Verify work email, up to $0.010'));
@@ -152,7 +176,7 @@ export function discover() {
       'I approve the displayed maximum. No email is sent.'),
     button('Run selected action', () => enrich(enrichForm), 'btn primary'));
   return [h('div', { class: 'prospect-heading' }, h('div', null, h('h1', null, 'Find and enrich'),
-      h('p', null, 'Search public companies and use an optional capped provider for people and work emails. This runs inside Free Apollo.'))),
+      h('p', null, 'Find public companies and local businesses, check leaders on company websites, or use your own capped people provider.'))),
     h('p', { role: 'status', class: 'prospect-import-status' }, last.status || 'No search run this session.'),
     h('div', { class: 'discovery-grid' },
       h('section', { class: 'prospect-transfer' }, h('h2', null, 'Local businesses · free public data'),
@@ -160,6 +184,9 @@ export function discover() {
         localForm, resultTable(last.local)),
       h('section', { class: 'prospect-transfer' }, h('h2', null, 'Companies · free public data'),
         h('p', null, 'Wikidata is uneven. A missing field stays unknown.'), companyForm, resultTable(last.company)),
+      h('section', { class: 'prospect-transfer' }, h('h2', null, 'Company website · free'),
+        h('p', null, 'Read one page on a saved company domain. Structured leader entries become candidates. If the page uses ordinary prose, enter a full name and nearby role to check them against that page. Review candidates before saving.'),
+        companies.length ? siteForm : h('p', { class: 'muted' }, 'Save a company with a website domain first.'), resultTable(last.site)),
       h('section', { class: 'prospect-transfer' }, h('h2', null, 'People · your provider key'),
         h('p', null, 'Search by title and company. Requires TREG_TOKEN. No search runs until you approve its cap.'), peopleForm, resultTable(last.people))),
     h('section', { class: 'prospect-transfer' }, h('h2', null, 'Contact enrichment'),

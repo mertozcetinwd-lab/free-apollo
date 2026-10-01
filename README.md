@@ -4,7 +4,7 @@ A standalone prospecting, engagement planning and CRM workspace. It uses proven 
 
 ## What works
 
-- Search public companies by industry through Wikidata and local businesses through OpenStreetMap. City lookup needs an application contact address. Optionally search people by title and company through a capped provider using your own key.
+- Search public companies by industry through Wikidata and local businesses through OpenStreetMap. City lookup needs an application contact address. Read a chosen page on a saved company website for explicitly labelled leaders, or check a name and nearby role shown on that page. Optionally search people by title and company through a capped provider using your own key.
 - Find or verify a saved person's work email with a separate cap and visible result state. A found email is not marked verified.
 - Search, filter, sort and save views for people, companies and deals already in your database.
 - Import or export CSV from the People and Companies pages. CSV export protects spreadsheet cells that could run formulas.

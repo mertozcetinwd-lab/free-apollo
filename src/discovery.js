@@ -32,6 +32,8 @@ export const SOURCES = [
     note: 'Place lookup plus a category search. Shared public servers may be busy; results need review.' },
   { id: 'wikidata', kind: 'companies', class: 'free public', label: 'Wikidata companies', cap_micros: 0,
     note: 'Industry and optional US state. Public data is uneven and needs review.' },
+  { id: 'company_site', kind: 'people', class: 'free public', label: 'Company website people', cap_micros: 0,
+    note: 'Read one chosen company page. Structured Person entries or a user-entered name and nearby role become candidates.' },
   { id: 'treg_people', kind: 'people', class: 'paid BYOK', label: 'People by title and company', cap_micros: 100_000,
     note: 'Optional treg token. A search can cost up to $0.10; the actual charge is logged.' },
   { id: 'treg_email_find', kind: 'people', class: 'paid BYOK', label: 'Find work email', cap_micros: 20_000,
@@ -154,6 +156,112 @@ async function store(db, kind, source, query, results, cost = 0) {
   const row = await db.prepare(`INSERT INTO prospect_searches(kind,source,query,results,observed_at,expires_at,cost_micros)
     VALUES (?1,?2,?3,?4,?5,?6,?7) RETURNING id`).bind(kind, source, JSON.stringify(query), JSON.stringify(results), at, expires, cost).first();
   return { id: row.id, kind, source, query, results, observed_at: at, cost_micros: cost, cached: false };
+}
+
+const personRole = (value) => text(value, 200);
+const personName = (value) => text(value, 300);
+const hasType = (node, type) => [node?.['@type']].flat().some((v) => String(v).toLowerCase().split('/').pop() === type);
+
+/** Only explicit, labelled Person entries are candidates. Page text is never guessed into a person. */
+export function parseCompanySitePeople(html, sourceUrl, companyDomain) {
+  const entries = [];
+  const scripts = String(html).match(/<script\b[^>]*type\s*=\s*["']application\/ld\+json["'][^>]*>[\s\S]*?<\/script\s*>/gi) || [];
+  for (const script of scripts.slice(0, 30)) {
+    const raw = script.replace(/^<script\b[^>]*>/i, '').replace(/<\/script\s*>$/i, '').trim();
+    let json;
+    try { json = JSON.parse(raw); } catch { continue; }
+    const visit = (node, depth = 0) => {
+      if (!node || typeof node !== 'object' || depth > 5) return;
+      if (Array.isArray(node)) { node.forEach((item) => visit(item, depth + 1)); return; }
+      if (hasType(node, 'person')) {
+        const name = personName(node.name), title = personRole(node.jobTitle || node.roleName);
+        if (name && title && /\b(owner|founder|co-founder|cofounder|president|chief executive|ceo)\b/i.test(title))
+          entries.push({ name, title, domain: companyDomain, source_url: sourceUrl });
+      }
+      for (const key of ['@graph', 'employee', 'founder', 'member', 'author']) visit(node[key], depth + 1);
+    };
+    visit(json);
+  }
+  return [...new Map(entries.map((row) => [`${row.name.toLowerCase()}|${row.title.toLowerCase()}`, row])).values()].slice(0, 25);
+}
+
+function pageText(html) {
+  return String(html).replace(/<!--[^]*?-->/g, ' ')
+    .replace(/<(script|style|noscript|svg)\b[^>]*>[^]*?<\/\1\s*>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&(#(?:x[0-9a-f]+|\d+)|amp|quot|apos|nbsp|lt|gt);/gi, (_, entity) => {
+      const named = { amp: '&', quot: '"', apos: "'", nbsp: ' ', lt: '<', gt: '>' };
+      const lower = entity.toLowerCase();
+      if (named[lower]) return named[lower];
+      const n = lower.startsWith('#x') ? parseInt(lower.slice(2), 16) : Number(lower.slice(1));
+      return n > 0 && n <= 0x10ffff ? String.fromCodePoint(n) : ' ';
+    }).replace(/\s+/g, ' ').trim();
+}
+
+/** A user-guided candidate needs both the exact name and a nearby role on the chosen page. */
+function guidedPerson(html, name, title, sourceUrl, companyDomain) {
+  if (!name && !title) return null;
+  if (!/^[\p{L}][\p{L}'’-]*(?: [\p{L}][\p{L}'’-]*){1,3}$/u.test(name)
+    || !/\b(owner|founder|co-founder|cofounder|president|chief executive|ceo)\b/i.test(title))
+    fail(400, 'Enter a full name and an owner or founder role shown on the page');
+  const body = pageText(html).toLowerCase();
+  const person = name.toLowerCase(), role = title.toLowerCase();
+  const rolePattern = /\bfounder\b/.test(role) ? /\b(founder|founded)\b/
+    : /\bowner\b/.test(role) ? /\b(owner|owned)\b/ : null;
+  let from = 0, matched = false;
+  while ((from = body.indexOf(person, from)) !== -1) {
+    const nearby = body.slice(Math.max(0, from - 220), Math.min(body.length, from + person.length + 220));
+    if (nearby.includes(role) || rolePattern?.test(nearby)) { matched = true; break; }
+    from += person.length;
+  }
+  if (!matched) fail(422, 'That name and role were not found together on this page. Check the source or try another page.');
+  return { name, title, domain: companyDomain, source_url: sourceUrl };
+}
+
+async function readCompanyHtml(response) {
+  const reader = response.body?.getReader();
+  if (!reader) fail(502, 'Company page had no readable body.');
+  const decoder = new TextDecoder();
+  let bytes = 0, html = '';
+  for (;;) {
+    const chunk = await reader.read();
+    if (chunk.done) break;
+    bytes += chunk.value.byteLength;
+    if (bytes > 500_000) { await reader.cancel(); fail(413, 'Company page is over the 500 KB reading limit.'); }
+    html += decoder.decode(chunk.value, { stream: true });
+  }
+  return html + decoder.decode();
+}
+
+export async function searchCompanySitePeople(db, input, fetcher = globalThis.fetch.bind(globalThis)) {
+  const companyId = idOf(input?.company_id);
+  const company = await db.prepare('SELECT id,name,domain FROM companies WHERE id=?1 AND deleted_at IS NULL').bind(companyId).first();
+  if (!company?.domain || !domain(company.domain)) fail(400, 'Save a company with a valid website domain first');
+  let url;
+  try { url = new URL(String(input?.url || '')); } catch { fail(400, 'Enter a full HTTPS page URL'); }
+  const host = url.hostname.toLowerCase().replace(/^www\./, '');
+  const root = domain(company.domain);
+  if (url.protocol !== 'https:' || url.port || url.username || url.password || !['', '443'].includes(url.port)
+    || (host !== root && !host.endsWith('.' + root)) || !/^[a-z0-9.-]+$/.test(host)
+    || url.href.length > 1000 || /^(localhost|.*\.local|.*\.internal)$/.test(host))
+    fail(400, 'Use an HTTPS page on the saved company domain');
+  url.hash = '';
+  const name = personName(input?.name), title = personRole(input?.title);
+  const query = { company_id: companyId, url: url.href, name, title };
+  const old = await cached(db, 'people', 'company_site', query);
+  if (old) return old;
+  let response;
+  try { response = await fetcher(url.href, { redirect: 'manual', headers: { accept: 'text/html', 'user-agent': 'FreeApollo/1.0 (user-requested company page)' }, signal: AbortSignal.timeout(12_000) }); }
+  catch { fail(503, 'Company page could not be reached. Retry or enter another page.'); }
+  if (response.status >= 300 && response.status < 400) fail(502, 'Company page redirected. Enter its final HTTPS URL on the same domain.');
+  if (!response.ok) fail(502, `Company page returned ${response.status}. Retry or enter another page.`);
+  if (!(response.headers.get('content-type') || '').toLowerCase().includes('text/html')) fail(502, 'Company page did not return HTML.');
+  if (Number(response.headers.get('content-length') || 0) > 500_000) fail(413, 'Company page is over the 500 KB reading limit.');
+  const html = await readCompanyHtml(response);
+  const results = parseCompanySitePeople(html, url.href, root);
+  const guided = guidedPerson(html, name, title, url.href, root);
+  if (guided && !results.some((r) => r.name.toLowerCase() === guided.name.toLowerCase())) results.unshift(guided);
+  return store(db, 'people', 'company_site', query, results.slice(0, 25));
 }
 
 export async function searchCompanies(db, input, fetcher = globalThis.fetch.bind(globalThis)) {

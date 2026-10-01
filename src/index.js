@@ -17,7 +17,7 @@ import {
 } from './meta.js';
 import { overview, lists, createList, listMembers, changeMembers, sequences, saveSequence,
   planSequence, plannedPeople, setPlanState, evidence, transferBatch, costs } from './prospect.js';
-import { SOURCES, searchCompanies, geocodePlace, searchLocalCompanies, searchPeople, recentSearches,
+import { SOURCES, searchCompanies, geocodePlace, searchLocalCompanies, searchCompanySitePeople, searchPeople, recentSearches,
   getSearch, saveSearchResults, enrichPerson } from './discovery.js';
 import { draftFirstMessage } from './drafts.js';
 
@@ -56,6 +56,7 @@ async function route(request, env, url) {
     if (b === 'search' && c === 'companies' && m === 'POST') return json(await searchCompanies(db, await readJson(request)));
     if (b === 'search' && c === 'place' && m === 'POST') return json(await geocodePlace(db, env, await readJson(request)));
     if (b === 'search' && c === 'local' && m === 'POST') return json(await searchLocalCompanies(db, await readJson(request)));
+    if (b === 'search' && c === 'company-site' && m === 'POST') return json(await searchCompanySitePeople(db, await readJson(request)));
     if (b === 'search' && c === 'people' && m === 'POST') return json(await searchPeople(env, await readJson(request)));
     if (b === 'search' && c === 'save' && m === 'POST') return json(await saveSearchResults(db, await readJson(request)));
     if (b === 'search' && c && m === 'GET') return json(await getSearch(db, c));

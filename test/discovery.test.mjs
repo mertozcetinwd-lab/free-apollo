@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { fakeEnv, client } from './helpers.mjs';
-import { parseWikidata, searchCompanies, geocodePlace, searchLocalCompanies, searchPeople, enrichPerson } from '../src/discovery.js';
+import { parseWikidata, searchCompanies, geocodePlace, searchLocalCompanies, searchCompanySitePeople,
+  searchPeople, enrichPerson } from '../src/discovery.js';
 
 const wikidata = { results: { bindings: [{ c: { value: 'http://www.wikidata.org/entity/Q123' },
   cLabel: { value: 'Sample Workshop' }, site: { value: 'https://sample.example/' },
@@ -30,6 +31,63 @@ test('company search failures are retryable, not an empty success', async () => 
   await assert.rejects(searchCompanies(env.DB, { industry: 'software' }, async () => new Response('', { status: 503 })),
     /Wikidata returned 503/);
   assert.deepEqual(parseWikidata({ results: { bindings: [{ c: { value: 'bad' } }] } }), []);
+});
+
+test('official page search keeps named leaders as source-backed candidates without inventing email verification', async () => {
+  const env = fakeEnv(), api = await client(env);
+  const company = (await api.post('/api/companies', { name: 'Sample Workshop', domain: 'sample.example' })).body;
+  const html = `<html><script type="application/ld+json">{"@graph":[
+    {"@type":"Person","name":"Alex Sample","jobTitle":"Founder"},
+    {"@type":"Person","name":"Sam Example","jobTitle":"Engineer"}]}</script></html>`;
+  let calls = 0;
+  const fetcher = async (url, options) => {
+    calls++;
+    assert.equal(url, 'https://sample.example/about/');
+    assert.equal(options.redirect, 'manual');
+    return new Response(html, { headers: { 'content-type': 'text/html' } });
+  };
+  const first = await searchCompanySitePeople(env.DB, { company_id: company.id, url: 'https://sample.example/about/' }, fetcher);
+  assert.equal(first.results.length, 1);
+  assert.equal(first.results[0].name, 'Alex Sample');
+  assert.equal(first.results[0].email, undefined);
+  assert.equal(first.cost_micros, 0);
+  assert.equal((await searchCompanySitePeople(env.DB, { company_id: company.id, url: 'https://sample.example/about/' }, fetcher)).cached, true);
+  assert.equal(calls, 1);
+  const saved = await api.post('/api/prospect/search/save', { search_id: first.id, indices: [0] });
+  assert.equal(saved.body.added, 1);
+  const record = (await api.get(`/api/people/${saved.body.records[0]}`)).body;
+  assert.equal(record.email, null);
+  const evidence = (await api.get(`/api/prospect/evidence/people/${record.id}`)).body;
+  assert.ok(evidence.some((e) => e.field === 'title' && e.status === 'observed' && e.source_url === 'https://sample.example/about/'));
+});
+
+test('company page fetch stays on the saved HTTPS domain and fails loudly on redirects and bad content', async () => {
+  const env = fakeEnv(), api = await client(env);
+  const company = (await api.post('/api/companies', { name: 'Sample Workshop', domain: 'sample.example' })).body;
+  const input = { company_id: company.id, url: 'https://sample.example/about/' };
+  const never = async () => { throw new Error('Network must not run'); };
+  await assert.rejects(searchCompanySitePeople(env.DB, { ...input, url: 'https://sample.example.evil.com/about' }, never), /saved company domain/);
+  await assert.rejects(searchCompanySitePeople(env.DB, { ...input, url: 'http://sample.example/about' }, never), /HTTPS/);
+  await assert.rejects(searchCompanySitePeople(env.DB, input, async () => new Response('', { status: 302, headers: { location: 'https://evil.com/' } })), /redirected/);
+  await assert.rejects(searchCompanySitePeople(env.DB, input, async () => new Response('{}', { headers: { 'content-type': 'application/json' } })), /did not return HTML/);
+  await assert.rejects(searchCompanySitePeople(env.DB, input, async () => { throw new Error('offline'); }), /could not be reached/);
+  await assert.rejects(searchCompanySitePeople(env.DB, input, async () => new Response('x'.repeat(500_001),
+    { headers: { 'content-type': 'text/html' } })), /500 KB reading limit/);
+});
+
+test('user-guided website leader must appear with the role nearby in page copy', async () => {
+  const env = fakeEnv(), api = await client(env);
+  const company = (await api.post('/api/companies', { name: 'Sample Workshop', domain: 'sample.example' })).body;
+  const fetcher = async () => new Response('<html><h2>Meet the Owner</h2><p>Alex Sample founded the shop in 2010.</p></html>',
+    { headers: { 'content-type': 'text/html' } });
+  const query = { company_id: company.id, url: 'https://sample.example/team', name: 'Alex Sample', title: 'Owner' };
+  const found = await searchCompanySitePeople(env.DB, query, fetcher);
+  assert.deepEqual(found.results.map((r) => r.name), ['Alex Sample']);
+  await assert.rejects(searchCompanySitePeople(env.DB, { ...query, name: 'Another Person' }, fetcher), /not found together/);
+  await assert.rejects(searchCompanySitePeople(env.DB, { ...query, title: 'Engineer' }, fetcher), /owner or founder role/);
+  await assert.rejects(searchCompanySitePeople(env.DB, { ...query, name: 'Alex Sample', url: 'https://sample.example/empty' },
+    async () => new Response('<html><p>Alex Sample</p><p>'.concat('Other information '.repeat(100), 'Owner</p></html>'),
+      { headers: { 'content-type': 'text/html' } })), /not found together/);
 });
 
 test('local business search geocodes once, checks map results and saves source evidence', async () => {
