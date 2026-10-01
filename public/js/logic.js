@@ -15,6 +15,7 @@ export function fmtMoney(cents, currency = 'USD', { compact = false } = {}) {
     return new Intl.NumberFormat('en-US', {
       style: 'currency', currency,
       notation: compact ? 'compact' : 'standard',
+      minimumFractionDigits: compact ? 0 : (Number.isInteger(n) ? 0 : 2),
       maximumFractionDigits: compact ? 1 : (Number.isInteger(n) ? 0 : 2),
     }).format(n);
   } catch {
